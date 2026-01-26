@@ -1,0 +1,67 @@
+#include <zephyr/dt-bindings/led/led.h>
+
+/ {
+	aliases {
+		led-strip = &led_strip;
+		modem-uart = &uart1;
+		modem-pwr = &modem_pwr_key;
+	};
+
+	gpio_keys {
+		compatible = "gpio-keys";
+		modem_pwr_key: modem_pwr_key {
+			gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
+			label = "Modem Power Key";
+		};
+	};
+};
+
+// LED
+
+&i2s_default {
+	group1 {
+		pinmux = <I2S_O_SD_GPIO8>;
+	};
+};
+
+i2s_led: &i2s {
+	status = "okay";
+
+	dmas = <&dma 3>;
+	dma-names = "tx";
+
+	led_strip: ws2812@0 {
+		compatible = "worldsemi,ws2812-i2s";
+
+		reg = <0>;
+		chain-length = <1>;
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+		reset-delay = <500>;
+	};
+};
+
+&dma {
+	status = "okay";
+};
+
+// SIM7070 UART
+
+&pinctrl {
+	uart1_modem_default: uart1_modem_default {
+		group1 {
+			pinmux = <UART1_TX_GPIO13>,
+				     <UART1_RX_GPIO14>;
+			output-high;
+			input-enable;
+		};
+	};
+};
+
+&uart1 {
+	status = "okay";
+	current-speed = <115200>; // SIM7070 baud rate
+	pinctrl-0 = <&uart1_modem_default>;
+	pinctrl-names = "default";
+};
