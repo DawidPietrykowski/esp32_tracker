@@ -1,3 +1,4 @@
+#include "zephyr/sys/printk.h"
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/led_strip.h>
 #include <zephyr/device.h>
@@ -8,58 +9,66 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
-#define STRIP_NODE		DT_ALIAS(led_strip)
-#define STRIP_NUM_PIXELS	DT_PROP(STRIP_NODE, chain_length)
-
-static const struct led_rgb colors[] = {
-	{ .r = 255, .g = 0,   .b = 0   },
-	{ .r = 0,   .g = 255, .b = 0   },
-	{ .r = 0,   .g = 0,   .b = 255 },
-	{ .r = 0,   .g = 0,   .b = 0   },
-};
-
 const struct gpio_dt_spec modem_pwr = GPIO_DT_SPEC_GET(DT_ALIAS(modem_pwr), gpios);
 const struct device *modem_uart = DEVICE_DT_GET(DT_ALIAS(modem_uart));
 
-static char rx_buf[256];
+#define RX_BUFFER_SIZE 256
+static char rx_buf[RX_BUFFER_SIZE];
 static int rx_pos = 0;
 
-#define MODEM_RESPONSE_WAIT_MS  3000
-
-// Read 512 bytes
-const char *read_cmd = "AT+SHREAD=0,512\r\n";
-// Disconnect
-const char *close_cmd = "AT+SHDISC\r\n";
+#define MODEM_RESPONSE_WAIT_MS  500
 
 const char *at_command_list[] = {
-    "AT\r\n", 
-
-    // Reset Modem
-    "AT+CFUN=0\r\n", 
-
-    // Set Preferred Mode to AUTOMATIC
-    "AT+CNMP=2\r\n", 
-
+		// Disable echo
+    "ATE0",
+    // Enable error messages
+		"AT+CMEE=2",
+    // Set preferred mode to AUTOMATIC
+    "AT+CNMP=2", 
     // Enable CAT-M and NB-IoT scanning
-    "AT+CMNB=3\r\n",
+    "AT+CMNB=3",
+    // Set APN
+    "AT+CGDCONT=1,\"IP\",\"iot\"", 
+    // Query SW version
+    "AT+CGMR",
+    "ATI",
+};
 
-    // APN
-    "AT+CGDCONT=1,\"IP\",\"iot\"\r\n", 
-
-    // Reboot radio
-    "AT+CFUN=1\r\n", 
-    
+const char *connect_command_list[] = {
     // Check signal
-    "AT+CSQ\r\n",
-    "AT+CSQ\r\n",
-    "AT+CSQ\r\n",
-    "AT+CSQ\r\n",
-    "AT+CSQ\r\n",
-    "AT+CSQ\r\n",
-    "AT+CSQ\r\n",
-    
-    // Check service
-    "AT+CPSI?\r\n",
+    "AT+CSQ",
+    // Check connection
+    "AT+CPSI?",
+    "AT+CREG?",  // 2G Registration
+    "AT+CGREG?", // LTE Registration
+    "AT+COPS?",  // ISP
+    "AT+CPSI?",   // System info
+
+    // Get IPv4 IP
+		"AT+CNACT=0,1",
+
+    // Wait for IP
+		"AT+CNACT?",
+		"AT+CNACT?",
+		"AT+CNACT?",
+		"AT+CNACT?",
+
+		// --- HTTP setup
+		// Disconnect
+		"AT+SHDISC",
+
+		// Configure SSL
+		"AT+SHSSL?",
+		"AT+CSSLCFG=?",
+		"AT+CSSLCFG=\"sslversion\",1,3",
+		"AT+CSSLCFG=\"sni\",1,\"gps.dawidpietrykowski.com\"",
+		"AT+CSSLCFG=\"ignorertctime\",1,1",
+		"AT+SHSSL=1,\"\"",
+
+		// Configure URL
+		"AT+SHCONF=\"URL\",https://gps.dawidpietrykowski.com",
+		"AT+SHCONF=\"HEADERLEN\",349",
+		"AT+SHCONF=\"BODYLEN\",500",
 };
 
 void uart_cb(const struct device *dev, void *user_data)
@@ -86,10 +95,99 @@ void send_at_cmd(const char *cmd)
 {
 	printk("\n\n>>> SENDING: %s", cmd);
 	
+	uart_poll_out(modem_uart, '\r');
+	uart_poll_out(modem_uart, '\n');
 	for (int i = 0; i < strlen(cmd); i++) {
 		uart_poll_out(modem_uart, cmd[i]);
 	}
+	uart_poll_out(modem_uart, '\r');
+	uart_poll_out(modem_uart, '\n');
 }
+
+void clear_buf()
+{
+	rx_buf[0] = '\0';
+	rx_pos=0;
+}
+
+void poll_at()
+{
+	char* search = "OK";
+	clear_buf();
+	for(;;)
+	{
+		send_at_cmd("AT");
+		k_msleep(200);
+		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
+		if(strstr(rx_buf, search) != NULL)
+			break;
+	}
+}
+
+void poll_ready()
+{
+	clear_buf();
+	char* search = "SMS Ready";
+	for(;;)
+	{
+		k_msleep(100);
+		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
+		if(strstr(rx_buf, search) != NULL)
+			break;
+	}
+}
+
+void poll_signal()
+{
+	char* search = "CSQ:";
+	for(;;)
+	{
+		clear_buf();
+		send_at_cmd("AT+CSQ");
+		k_msleep(500);
+		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
+		char* pos = strstr(rx_buf, search);
+		// CSQ: xx,xx
+		// 0123456789
+		*(pos+7) = '\0';
+		printk("\n\nreceived signal %s\n", pos);
+		if(strstr(pos, "99") == NULL)
+		{
+			printk("\n\nfound signal %s\n", pos);
+			break;
+		}
+	}
+}
+
+void poll_request()
+{
+	clear_buf();
+	char* search = "SHREQ:";
+	for(;;)
+	{
+		k_msleep(100);
+		printk("waiting for request finish\n");
+		if(strstr(rx_buf, search) != NULL)
+		{
+			printk("\n\nfinished request\n");
+			break;
+		}
+	}
+}
+
+void poll_ok()
+{
+	char* search = "OK";
+	clear_buf();
+	for(;;)
+	{
+		k_msleep(100);
+		printk("\n\nwaiting for ok, buffer len: %d\n", strlen(rx_buf));
+		if(strstr(rx_buf, search) != NULL)
+			break;
+	}
+}
+
 
 int main(void)
 {
@@ -100,49 +198,41 @@ int main(void)
 	uart_irq_callback_user_data_set(modem_uart, uart_cb, NULL);
 	uart_irq_rx_enable(modem_uart);
 
-	int cmd_count = sizeof(at_command_list) / sizeof(at_command_list[0]);
+	poll_at();
+	k_msleep(100);
 
+	// Disable radio
+	send_at_cmd("AT+CFUN=0"); 
+	k_msleep(1000);
+
+	// Configure
+	int cmd_count = sizeof(at_command_list) / sizeof(at_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(at_command_list[i]);
 		k_msleep(MODEM_RESPONSE_WAIT_MS);
 	}
 
-	while (1) {
+	// Enable radio
+	send_at_cmd("AT+CFUN=1"); 
+	poll_ready();
+	k_msleep(200);
+	poll_signal();
+
+	// Connect
+	cmd_count = sizeof(connect_command_list) / sizeof(connect_command_list[0]);
+	for (int i = 0; i < cmd_count; i++) {
+		send_at_cmd(connect_command_list[i]);
 		k_msleep(1000);
 	}
-	return 0;
 
-	const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
+	// Send request
+	send_at_cmd("AT+SHCONN");
+	poll_ok();
+	send_at_cmd("AT+SHREQ=\"/\",1");
+	poll_request();
+	send_at_cmd("AT+SHREAD=0,7");
+	k_msleep(100);
+	send_at_cmd("AT+SHDISC");
 
-	if (!device_is_ready(strip)) {
-		LOG_ERR("LED strip device not ready");
-		return 0;
-	}
-
-	LOG_INF("Found LED strip device %s", strip->name);
-
-	size_t color_idx = 0;
-
-	while (1) {
-		struct led_rgb pixel; 
-
-		pixel.r = colors[color_idx].r * 0.2f;
-		pixel.g = colors[color_idx].g * 0.2f;
-		pixel.b = colors[color_idx].b * 0.2f;
-
-		// Update the strip
-		int rc = led_strip_update_rgb(strip, &pixel, 1);
-		
-		if (rc) {
-			LOG_ERR("couldn't update strip: %d", rc);
-		}
-
-		color_idx++;
-		if (color_idx >= ARRAY_SIZE(colors)) {
-			color_idx = 0;
-		}
-
-		k_msleep(1000);
-	}
 	return 0;
 }
