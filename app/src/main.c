@@ -1,4 +1,5 @@
 #include "zephyr/sys/printk.h"
+#include <stdio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/led_strip.h>
 #include <zephyr/device.h>
@@ -35,14 +36,12 @@ const char *at_command_list[] = {
 };
 
 const char *connect_command_list[] = {
-    // Check signal
-    "AT+CSQ",
     // Check connection
-    "AT+CPSI?",
-    "AT+CREG?",  // 2G Registration
-    "AT+CGREG?", // LTE Registration
-    "AT+COPS?",  // ISP
-    "AT+CPSI?",   // System info
+    // "AT+CPSI?",
+    // "AT+CREG?",  // 2G Registration
+    // "AT+CGREG?", // LTE Registration
+    // "AT+COPS?",  // ISP
+    // "AT+CPSI?",  // System info
 
     // Get IPv4 IP
 		"AT+CNACT=0,1",
@@ -188,6 +187,48 @@ void poll_ok()
 	}
 }
 
+void poll_shbod()
+{
+	char* search = ">";
+	clear_buf();
+	for(;;)
+	{
+		k_msleep(100);
+		printk("\n\nwaiting for ok, buffer len: %d\n", strlen(rx_buf));
+		if(strstr(rx_buf, search) != NULL)
+			break;
+	}
+}
+
+typedef struct {
+  double latitude;
+  double longitude;
+  double signal;
+  double battery;
+  uint64_t timestamp;
+} frame;
+
+int send_frame(frame frame_to_send) {
+	char shbod[100];
+	sprintf(shbod, "AT+SHBOD=%d,%d\r", (int)sizeof(frame), 1000);
+	uart_poll_out(modem_uart, '\r');
+	uart_poll_out(modem_uart, '\n');
+	for (int i = 0; i < strlen(shbod); i++) {
+		uart_poll_out(modem_uart, shbod[i]);
+	}
+	poll_shbod();
+	for (int i = 0; i < sizeof(frame_to_send); i++) {
+		uart_poll_out(modem_uart, ((char*)&frame_to_send)[i]);
+	}
+	uart_poll_out(modem_uart, '\r');
+	uart_poll_out(modem_uart, '\n');
+
+	poll_ok();
+	send_at_cmd("AT+SHREQ=\"/pos\",3");
+	poll_request();
+
+	return 1;
+}
 
 int main(void)
 {
@@ -215,23 +256,29 @@ int main(void)
 	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
 	poll_ready();
-	k_msleep(200);
+	// k_msleep(200);
 	poll_signal();
 
 	// Connect
 	cmd_count = sizeof(connect_command_list) / sizeof(connect_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(connect_command_list[i]);
-		k_msleep(1000);
+		k_msleep(500);
 	}
 
 	// Send request
 	send_at_cmd("AT+SHCONN");
 	poll_ok();
-	send_at_cmd("AT+SHREQ=\"/\",1");
-	poll_request();
-	send_at_cmd("AT+SHREAD=0,7");
-	k_msleep(100);
+
+	frame frame_to_send;
+	frame_to_send.battery = 0.5;
+	frame_to_send.signal = 0.5;
+	frame_to_send.latitude = 41.111;
+	frame_to_send.longitude = 51.111;
+	send_frame(frame_to_send);
+
+	// send_at_cmd("AT+SHREAD=0,7");
+	// k_msleep(100);
 	send_at_cmd("AT+SHDISC");
 
 	return 0;
