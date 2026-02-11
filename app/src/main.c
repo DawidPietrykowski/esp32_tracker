@@ -1,5 +1,6 @@
 #include "zephyr/sys/printk.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/led_strip.h>
 #include <zephyr/device.h>
@@ -33,6 +34,11 @@ const char *at_command_list[] = {
     // Query SW version
     "AT+CGMR",
     "ATI",
+    // Ensure GNSS is off before configuring mode
+    // "AT+CGNSPWR=0",
+    // "AT+CGNSMOD=1,1,0,0,0", 
+    // "AT+CGNSCOLD",
+    "AT+CGNSPWR=1",
 };
 
 const char *connect_command_list[] = {
@@ -112,9 +118,9 @@ void clear_buf()
 void poll_at()
 {
 	char* search = "OK";
-	clear_buf();
 	for(;;)
 	{
+		clear_buf();
 		send_at_cmd("AT");
 		k_msleep(200);
 		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
@@ -230,6 +236,65 @@ int send_frame(frame frame_to_send) {
 	return 1;
 }
 
+void get_gps_data(frame *data)
+{
+	char* search = "+CGNSINF: ";
+	
+	// 1. Power on GPS
+	// send_at_cmd("AT+CGNSPWR=1");
+	// poll_ok();
+
+// +CGNSINF:
+// 	1
+// 		,
+// 		,
+// 		,51.919997
+// 		,19.129997
+// 		,-38.724
+// 		,
+// 		,
+// 		,1
+// 		,
+// 		,0.1
+// 		,0.1
+// 		,0.1,
+// 	,
+// 	,
+// 	,300118.5
+// 	,6000.0
+
+	for(;;) {
+		clear_buf();
+		send_at_cmd("AT+CGNSINF");
+		k_msleep(200);
+
+		// Format: +CGNSINF: <run>,<fix>,<date>,<lat>,<lon>...
+		char* pos = strstr(rx_buf, search);
+		if(pos != NULL)
+		{
+			pos += strlen(search);
+
+			// Use strtok to parse CSV (Note: modifies rx_buf)
+			char *token = strtok(pos, ","); // <run status>
+			token = strtok(NULL, ",");      // <fix status>
+
+			// Check if fix status is '1' (GPS fixed)
+			if(token != NULL && atoi(token) == 1) {
+				token = strtok(NULL, ","); // <date>
+				token = strtok(NULL, ","); // <latitude>
+				if(token) data->latitude = atof(token);
+				token = strtok(NULL, ","); // <longitude>
+				if(token) data->longitude = atof(token);
+				printk("\n>>> GPS Fix Acquired: %f, %f\n", data->latitude, data->longitude);
+				return;
+			} else {
+				printk("\n>>> GPS Not Fixed Yet\n");
+			}
+		}
+		k_msleep(200);
+	}
+}
+
 int main(void)
 {
 	printk("--- SIM7070G TEST ---\n");
@@ -242,6 +307,12 @@ int main(void)
 	poll_at();
 	k_msleep(100);
 
+	frame frame_to_send;
+	frame_to_send.battery = 0.5;
+	frame_to_send.signal = 0.5;
+	frame_to_send.latitude = 0.0;
+	frame_to_send.longitude = 0.0;
+
 	// Disable radio
 	send_at_cmd("AT+CFUN=0"); 
 	k_msleep(1000);
@@ -252,6 +323,9 @@ int main(void)
 		send_at_cmd(at_command_list[i]);
 		k_msleep(MODEM_RESPONSE_WAIT_MS);
 	}
+
+	get_gps_data(&frame_to_send);
+	return 0;
 
 	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
@@ -270,11 +344,6 @@ int main(void)
 	send_at_cmd("AT+SHCONN");
 	poll_ok();
 
-	frame frame_to_send;
-	frame_to_send.battery = 0.5;
-	frame_to_send.signal = 0.5;
-	frame_to_send.latitude = 41.111;
-	frame_to_send.longitude = 51.111;
 	send_frame(frame_to_send);
 
 	// send_at_cmd("AT+SHREAD=0,7");
