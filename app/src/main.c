@@ -427,6 +427,32 @@ void configure_bmi160_interrupts(void)
     }
 }
 
+int power_on_sim7070g()
+{
+    int ret;
+
+    if (!gpio_is_ready_dt(&modem_pwr)) {
+        printk("Error: Modem GPIO not ready\n");
+        return -1;
+    }
+
+    ret = gpio_pin_configure_dt(&modem_pwr, GPIO_OUTPUT_INACTIVE);
+    if (ret < 0) {
+        printk("Error: Failed to set modem GPIO\n");
+        return ret;
+    }
+
+    gpio_pin_set_dt(&modem_pwr, 1);
+    
+    k_sleep(K_SECONDS(1)); 
+    
+    gpio_pin_set_dt(&modem_pwr, 0);
+
+    k_sleep(K_SECONDS(1));
+
+    return 0;
+}
+
 int main(void)
 {
   printk("Starting BMI160 on ESP32-H2\n");
@@ -446,6 +472,8 @@ int main(void)
 
 	uart_irq_callback_user_data_set(modem_uart, uart_cb, NULL);
 	uart_irq_rx_enable(modem_uart);
+
+	if (power_on_sim7070g()) return 0;
 
 	poll_at();
 	k_msleep(100);
@@ -489,6 +517,10 @@ int main(void)
 	poll_ok();
 	send_frame(frame_to_send);
 	send_at_cmd("AT+SHDISC");
+	poll_ok();
+
+	// Disable module
+	send_at_cmd("AT+CPOWD=1");
 
 	return 0;
 }
