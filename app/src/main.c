@@ -150,7 +150,7 @@ void poll_ready()
 	}
 }
 
-void poll_signal()
+int poll_signal()
 {
 	char* search = "CSQ:";
 	for(;;)
@@ -168,8 +168,9 @@ void poll_signal()
 		printk("\n\nreceived signal %s\n", pos);
 		if(strstr(pos, "99") == NULL)
 		{
-			printk("\n\nfound signal %s\n", pos);
-			break;
+			int signal = atoi(pos + 5);
+			printk("\n\nfound signal %d\n", signal);
+			return signal;
 		}
 	}
 }
@@ -412,34 +413,15 @@ void configure_bmi160_interrupts(void)
         return;
     }
 
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x7E, 0xB6) != 0) {
-        printk("Failed to write INT_OUT_CTRL\n");
-    }
-    k_sleep(K_MSEC(50));
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x7E, 0x12) != 0) {
-        printk("Failed to write INT_OUT_CTRL\n");
-    }
-    k_sleep(K_MSEC(50));
-
-    // Enable low-g interrupt
+    // Enable single-tap interrupt
     if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_MAP_0, 0x20) != 0) {
         printk("Failed to write INT_MAP_0\n");
     }
-
-    // Enable INT1 interrupt
-    // if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_OUT_CTRL, 0b1000) != 0) {
-    //     printk("Failed to write INT_OUT_CTRL\n");
-    // }
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x53, 0xAA) != 0) {
+    // Configure INT1 output
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x53, 0xA) != 0) {
         printk("Failed to write INT_OUT_CTRL\n");
     }
-    // Enable INT1 interrupt
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x40, 0x88) != 0) {
-        printk("Failed to write INT_OUT_CTRL\n");
-    }
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x54, 0x9) != 0) {
-        printk("Failed to write INT_OUT_CTRL\n");
-    }
+    // Enable interrupt
     if (i2c_reg_write_byte_dt(&dev_i2c, 0x50, 0x30) != 0) {
         printk("Failed to write INT_OUT_CTRL\n");
     }
@@ -469,8 +451,7 @@ int main(void)
 	k_msleep(100);
 
 	frame frame_to_send;
-	frame_to_send.battery = 0.5;
-	frame_to_send.signal = 0.5;
+	frame_to_send.battery = 0.0; // TODO: ADC for battery level
 	frame_to_send.latitude = 0.0;
 	frame_to_send.longitude = 0.0;
 
@@ -493,7 +474,8 @@ int main(void)
 	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
 	poll_ready();
-	poll_signal();
+	int signal = poll_signal();
+	frame_to_send.signal = (double)signal / 99.0;
 
 	// Connect
 	cmd_count = sizeof(connect_command_list) / sizeof(connect_command_list[0]);
