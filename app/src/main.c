@@ -20,6 +20,7 @@ const struct gpio_dt_spec modem_pwr = GPIO_DT_SPEC_GET(DT_ALIAS(modem_pwr), gpio
 const struct device *modem_uart = DEVICE_DT_GET(DT_ALIAS(modem_uart));
 
 #define BMI160_REG_INT_MAP_0  0x55
+#define BMI160_REG_INT_OUT_CTRL  0x53
 
 static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(DT_NODELABEL(my_bmi160));
 
@@ -411,9 +412,36 @@ void configure_bmi160_interrupts(void)
         return;
     }
 
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x7E, 0xB6) != 0) {
+        printk("Failed to write INT_OUT_CTRL\n");
+    }
+    k_sleep(K_MSEC(50));
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x7E, 0x12) != 0) {
+        printk("Failed to write INT_OUT_CTRL\n");
+    }
+    k_sleep(K_MSEC(50));
+
     // Enable low-g interrupt
-    if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_MAP_0, 0b1) != 0) {
+    if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_MAP_0, 0x20) != 0) {
         printk("Failed to write INT_MAP_0\n");
+    }
+
+    // Enable INT1 interrupt
+    // if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_OUT_CTRL, 0b1000) != 0) {
+    //     printk("Failed to write INT_OUT_CTRL\n");
+    // }
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x53, 0xAA) != 0) {
+        printk("Failed to write INT_OUT_CTRL\n");
+    }
+    // Enable INT1 interrupt
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x40, 0x88) != 0) {
+        printk("Failed to write INT_OUT_CTRL\n");
+    }
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x54, 0x9) != 0) {
+        printk("Failed to write INT_OUT_CTRL\n");
+    }
+    if (i2c_reg_write_byte_dt(&dev_i2c, 0x50, 0x30) != 0) {
+        printk("Failed to write INT_OUT_CTRL\n");
     }
 }
 
@@ -429,7 +457,7 @@ int main(void)
   }
 
   configure_bmi160_interrupts();
-    
+
 	printk("--- SIM7070G TEST ---\n");
 
 	if (!device_is_ready(modem_uart)) return 0;

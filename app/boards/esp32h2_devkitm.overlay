@@ -5,6 +5,7 @@
 		led-strip = &led_strip;
 		modem-uart = &uart1;
 		modem-pwr = &modem_pwr_key;
+		wakeup-pin = &pin0;
 	};
 
 	gpio_keys {
@@ -12,6 +13,14 @@
 		modem_pwr_key: modem_pwr_key {
 			gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
 			label = "Modem Power Key";
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		pin0: pin0 {
+			gpios = <&gpio0 9 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+			label = "bmi160 INT1";
 		};
 	};
 };
