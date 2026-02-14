@@ -1,4 +1,6 @@
 #include "zephyr/sys/printk.h"
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <zephyr/kernel.h>
@@ -19,32 +21,26 @@ static char rx_buf[RX_BUFFER_SIZE];
 static int rx_pos = 0;
 
 #define MODEM_RESPONSE_WAIT_MS  500
+#define GPS_POLLING_WAIT_MS  5000
+#define GPS_RESPONSE_WAIT_MS  500
+#define GPS_POLLING_MAX_MS  15000
 
 const char *at_command_list[] = {
 		// Disable echo
     "ATE0",
     // Enable error messages
 		"AT+CMEE=2",
+    // Query SW version
+    "AT+CGMR",
     // Set preferred mode to AUTOMATIC
     "AT+CNMP=2", 
     // Enable CAT-M and NB-IoT scanning
     "AT+CMNB=3",
     // Set APN
     "AT+CGDCONT=1,\"IP\",\"iot\"", 
-    // Query SW version
-    "AT+CGMR",
     "ATI",
-    // Ensure GNSS is off before configuring mode
-    // "AT+CGNSPWR=0",
-    // "AT+CGNSMOD=1,1,0,0,0", 
-    // "AT+CGNSCOLD",
-    // "AT+CGNSMOD?",
+    // Enable GPS
     "AT+CGNSPWR=1",
-    // "AT+CGNSCOLD",
-    // "AT+SGNSCMD=1",
-    // "AT+SGNSCFG=\"MODE\",0",
-    // "AT+SGNSCFG=\"EXTRAINFO\",1",
-    // "AT+SGNSCMD=1,0"
 };
 
 const char *connect_command_list[] = {
@@ -55,9 +51,9 @@ const char *connect_command_list[] = {
     // "AT+COPS?",  // ISP
     // "AT+CPSI?",  // System info
 
+    // --- NB-IoT setup
     // Get IPv4 IP
 		"AT+CNACT=0,1",
-
     // Wait for IP
 		"AT+CNACT?",
 		"AT+CNACT?",
@@ -242,7 +238,7 @@ int send_frame(frame frame_to_send) {
 	return 1;
 }
 
-static char *str_token(char **str, const char *delim) {
+static char *at_token(char **str) {
     char *token_start;
     
     if (str == NULL || *str == NULL || **str == '\0') {
@@ -251,16 +247,14 @@ static char *str_token(char **str, const char *delim) {
 
     token_start = *str;
     
-    // Find the first occurrence of the delimiter
-    char *token_end = strpbrk(token_start, delim);
+    // first occurrence of the delimiter
+    char *token_end = strpbrk(token_start, ",");
 
     if (token_end) {
-        // Terminate the current token
         *token_end = '\0';
-        // Point to the next character after the delimiter
         *str = token_end + 1;
     } else {
-        // No more delimiters, point to the end
+        // no delimiters, point to end
         *str = token_start + strlen(token_start);
     }
 
@@ -270,17 +264,12 @@ static char *str_token(char **str, const char *delim) {
 void get_gps_data(frame *data)
 {
 	char* search = "+CGNSINF: ";
-	// char* search = "SGNSERR";
-	
-	// send_at_cmd("AT+CGNSPWR=1");
-	// poll_ok();
+	uint32_t polling_time = 0;
 
-	// send_at_cmd("AT+SGNSCMD=1,0");
 	for(;;) {
-		k_msleep(5000);
 		clear_buf();
 		send_at_cmd("AT+CGNSINF");
-		k_msleep(1000);
+		k_msleep(GPS_RESPONSE_WAIT_MS);
 		char* pos = strstr(rx_buf, search);
 		if(pos != NULL)
 		{
@@ -289,11 +278,10 @@ void get_gps_data(frame *data)
       int fix_status = 0;
 		  char *token;
 		  int index = 0;
-	    char utc_datetime[32]; // Format: yyyyMMddhhmmss.sss
+	    char utc_datetime[32]; // yyyyMMddhhmmss.sss
 		  int run_status;
 
-
-	    while ((token = str_token(&pos, ",")) != NULL) {
+	    while ((token = at_token(&pos)) != NULL) {
 	        printk("Index %d: '%s'\n", index, token);
         
 	        switch (index) {
@@ -322,14 +310,11 @@ void get_gps_data(frame *data)
 	                if (*token != '\0') {
 	                	data->longitude = strtod(token, NULL);
 		                printk("longitude: %f\n", data->longitude);
-		                if (fix_status) {
-		                	return;
-		                }
 	                }
 	                break;
-	            case 5: // MSL Altitude
+	            case 5: // Altitude
 	                if (*token != '\0') {
-	                	float altitude = strtof(token, NULL);
+	                	double altitude = strtod(token, NULL);
 		                printk("altitude: %f\n", altitude);
 	                }
 	                break;
@@ -338,7 +323,21 @@ void get_gps_data(frame *data)
 	        }
 	        index++;
 	    }
+      if (fix_status) {
+			  printk("Found GPS position\n");
+      	return;
+      }
+		} else {
+			if (polling_time >= GPS_POLLING_MAX_MS) {
+			  printk("Failed to get GPS\n");
+			  data->latitude = NAN;
+			  data->longitude = NAN;
+			  data->timestamp = NAN;
+			  return;
+			}
 		}
+		k_msleep(GPS_POLLING_WAIT_MS);
+    polling_time += GPS_POLLING_WAIT_MS + GPS_RESPONSE_WAIT_MS;
 	}
 }
 
@@ -372,12 +371,10 @@ int main(void)
 	}
 
 	get_gps_data(&frame_to_send);
-	// return 0;
 
 	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
 	poll_ready();
-	// k_msleep(200);
 	poll_signal();
 
 	// Connect
@@ -390,11 +387,7 @@ int main(void)
 	// Send request
 	send_at_cmd("AT+SHCONN");
 	poll_ok();
-
 	send_frame(frame_to_send);
-
-	// send_at_cmd("AT+SHREAD=0,7");
-	// k_msleep(100);
 	send_at_cmd("AT+SHDISC");
 
 	return 0;
