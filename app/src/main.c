@@ -10,12 +10,18 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/timeutil.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/i2c.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 const struct gpio_dt_spec modem_pwr = GPIO_DT_SPEC_GET(DT_ALIAS(modem_pwr), gpios);
 const struct device *modem_uart = DEVICE_DT_GET(DT_ALIAS(modem_uart));
+
+#define BMI160_REG_INT_MAP_0  0x55
+
+static const struct i2c_dt_spec dev_i2c = I2C_DT_SPEC_GET(DT_NODELABEL(my_bmi160));
 
 #define RX_BUFFER_SIZE 256
 static char rx_buf[RX_BUFFER_SIZE];
@@ -398,8 +404,32 @@ void get_gps_data(frame *data)
 	}
 }
 
+void configure_bmi160_interrupts(void)
+{
+    if (!i2c_is_ready_dt(&dev_i2c)) {
+        printk("I2C bus not ready\n");
+        return;
+    }
+
+    // Enable low-g interrupt
+    if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_MAP_0, 0b1) != 0) {
+        printk("Failed to write INT_MAP_0\n");
+    }
+}
+
 int main(void)
 {
+  printk("Starting BMI160 on ESP32-H2\n");
+
+  const struct device *const bmi160 = DEVICE_DT_GET_ANY(bosch_bmi160);
+
+  if (!device_is_ready(bmi160)) {
+      printk("bmi160 is not ready\n");
+      return 0;
+  }
+
+  configure_bmi160_interrupts();
+    
 	printk("--- SIM7070G TEST ---\n");
 
 	if (!device_is_ready(modem_uart)) return 0;
