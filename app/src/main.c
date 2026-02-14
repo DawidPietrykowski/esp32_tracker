@@ -1,4 +1,3 @@
-#include "zephyr/sys/printk.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,6 +8,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/sys/timeutil.h>
+#include <zephyr/sys/printk.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -261,6 +262,64 @@ static char *at_token(char **str) {
     return token_start;
 }
 
+int64_t gps_date_to_epoch_ms(const char *ts_str)
+{
+    struct tm tm_data = { 0 };
+    char temp_buf[5];
+    int ms = 0;
+
+    if (strlen(ts_str) < 18) {
+        printk("Error: Timestamp string too short\n");
+        return -1;
+    }
+
+    // year
+    memcpy(temp_buf, &ts_str[0], 4);
+    temp_buf[4] = '\0';
+    tm_data.tm_year = atoi(temp_buf) - 1900; 
+
+    // month
+    memcpy(temp_buf, &ts_str[4], 2);
+    temp_buf[2] = '\0';
+    tm_data.tm_mon = atoi(temp_buf) - 1; 
+
+    // day
+    memcpy(temp_buf, &ts_str[6], 2);
+    temp_buf[2] = '\0';
+    tm_data.tm_mday = atoi(temp_buf);
+
+    // hour
+    memcpy(temp_buf, &ts_str[8], 2);
+    temp_buf[2] = '\0';
+    tm_data.tm_hour = atoi(temp_buf);
+
+    // minute
+    memcpy(temp_buf, &ts_str[10], 2);
+    temp_buf[2] = '\0';
+    tm_data.tm_min = atoi(temp_buf);
+
+    // second
+    memcpy(temp_buf, &ts_str[12], 2);
+    temp_buf[2] = '\0';
+    tm_data.tm_sec = atoi(temp_buf);
+
+    // millisecond
+    memcpy(temp_buf, &ts_str[15], 3);
+    temp_buf[3] = '\0';
+    ms = atoi(temp_buf);
+
+    time_t seconds_epoch = timeutil_timegm(&tm_data);
+
+    if (seconds_epoch == -1) {
+        printk("Error: Failed to convert time to epoch seconds\n");
+        return -1;
+    }
+
+    int64_t total_ms = ((int64_t)seconds_epoch * 1000) + ms;
+
+    return total_ms;
+}
+
 void get_gps_data(frame *data)
 {
 	char* search = "+CGNSINF: ";
@@ -291,13 +350,14 @@ void get_gps_data(frame *data)
 	                break;
 	            case 1: // Fix Status
 	                if (*token != '\0') fix_status = atoi(token);
-	                else fix_status = 0; // Empty means no fix
+	                else fix_status = 0;
 	                printk("fix: %d\n", fix_status);
 	                break;
 	            case 2: // UTC Date & Time
 	                if (*token != '\0') {
 	                    strncpy(utc_datetime, token, sizeof(utc_datetime) - 1);
-			                printk("date: %s\n", utc_datetime);
+											data->timestamp = (uint64_t)gps_date_to_epoch_ms(utc_datetime);
+			                printk("date: %s, ms: %lld\n", utc_datetime, data->timestamp);
 	                }
 	                break;
 	            case 3: // Latitude
