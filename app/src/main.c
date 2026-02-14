@@ -38,7 +38,13 @@ const char *at_command_list[] = {
     // "AT+CGNSPWR=0",
     // "AT+CGNSMOD=1,1,0,0,0", 
     // "AT+CGNSCOLD",
+    // "AT+CGNSMOD?",
     "AT+CGNSPWR=1",
+    // "AT+CGNSCOLD",
+    // "AT+SGNSCMD=1",
+    // "AT+SGNSCFG=\"MODE\",0",
+    // "AT+SGNSCFG=\"EXTRAINFO\",1",
+    // "AT+SGNSCMD=1,0"
 };
 
 const char *connect_command_list[] = {
@@ -236,62 +242,103 @@ int send_frame(frame frame_to_send) {
 	return 1;
 }
 
+static char *str_token(char **str, const char *delim) {
+    char *token_start;
+    
+    if (str == NULL || *str == NULL || **str == '\0') {
+        return NULL;
+    }
+
+    token_start = *str;
+    
+    // Find the first occurrence of the delimiter
+    char *token_end = strpbrk(token_start, delim);
+
+    if (token_end) {
+        // Terminate the current token
+        *token_end = '\0';
+        // Point to the next character after the delimiter
+        *str = token_end + 1;
+    } else {
+        // No more delimiters, point to the end
+        *str = token_start + strlen(token_start);
+    }
+
+    return token_start;
+}
+
 void get_gps_data(frame *data)
 {
 	char* search = "+CGNSINF: ";
+	// char* search = "SGNSERR";
 	
-	// 1. Power on GPS
 	// send_at_cmd("AT+CGNSPWR=1");
 	// poll_ok();
 
-// +CGNSINF:
-// 	1
-// 		,
-// 		,
-// 		,51.919997
-// 		,19.129997
-// 		,-38.724
-// 		,
-// 		,
-// 		,1
-// 		,
-// 		,0.1
-// 		,0.1
-// 		,0.1,
-// 	,
-// 	,
-// 	,300118.5
-// 	,6000.0
-
+	// send_at_cmd("AT+SGNSCMD=1,0");
 	for(;;) {
+		k_msleep(5000);
 		clear_buf();
 		send_at_cmd("AT+CGNSINF");
-		k_msleep(200);
-
-		// Format: +CGNSINF: <run>,<fix>,<date>,<lat>,<lon>...
+		k_msleep(1000);
 		char* pos = strstr(rx_buf, search);
 		if(pos != NULL)
 		{
 			pos += strlen(search);
 
-			// Use strtok to parse CSV (Note: modifies rx_buf)
-			char *token = strtok(pos, ","); // <run status>
-			token = strtok(NULL, ",");      // <fix status>
+      int fix_status = 0;
+		  char *token;
+		  int index = 0;
+	    char utc_datetime[32]; // Format: yyyyMMddhhmmss.sss
+		  int run_status;
 
-			// Check if fix status is '1' (GPS fixed)
-			if(token != NULL && atoi(token) == 1) {
-				token = strtok(NULL, ","); // <date>
-				token = strtok(NULL, ","); // <latitude>
-				if(token) data->latitude = atof(token);
-				token = strtok(NULL, ","); // <longitude>
-				if(token) data->longitude = atof(token);
-				printk("\n>>> GPS Fix Acquired: %f, %f\n", data->latitude, data->longitude);
-				return;
-			} else {
-				printk("\n>>> GPS Not Fixed Yet\n");
-			}
+
+	    while ((token = str_token(&pos, ",")) != NULL) {
+	        printk("Index %d: '%s'\n", index, token);
+        
+	        switch (index) {
+	            case 0: // GNSS Run Status
+	                run_status = atoi(token);
+	                printk("run: %d\n", run_status);
+	                break;
+	            case 1: // Fix Status
+	                if (*token != '\0') fix_status = atoi(token);
+	                else fix_status = 0; // Empty means no fix
+	                printk("fix: %d\n", fix_status);
+	                break;
+	            case 2: // UTC Date & Time
+	                if (*token != '\0') {
+	                    strncpy(utc_datetime, token, sizeof(utc_datetime) - 1);
+			                printk("date: %s\n", utc_datetime);
+	                }
+	                break;
+	            case 3: // Latitude
+	                if (*token != '\0') {
+	                	data->latitude = strtod(token, NULL);
+		                printk("latitude: %f\n", data->latitude);
+	                }
+	                break;
+	            case 4: // Longitude
+	                if (*token != '\0') {
+	                	data->longitude = strtod(token, NULL);
+		                printk("longitude: %f\n", data->longitude);
+		                if (fix_status) {
+		                	return;
+		                }
+	                }
+	                break;
+	            case 5: // MSL Altitude
+	                if (*token != '\0') {
+	                	float altitude = strtof(token, NULL);
+		                printk("altitude: %f\n", altitude);
+	                }
+	                break;
+	            default:
+	                break;
+	        }
+	        index++;
+	    }
 		}
-		k_msleep(200);
 	}
 }
 
@@ -325,7 +372,7 @@ int main(void)
 	}
 
 	get_gps_data(&frame_to_send);
-	return 0;
+	// return 0;
 
 	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
