@@ -33,12 +33,6 @@ const char *at_command_list[] = {
 		"AT+CMEE=2",
     // Query SW version
     "AT+CGMR",
-    // Set preferred mode to AUTOMATIC
-    "AT+CNMP=2", 
-    // Enable CAT-M and NB-IoT scanning
-    "AT+CMNB=3",
-    // Set APN
-    "AT+CGDCONT=1,\"IP\",\"iot\"", 
     "ATI",
     // Enable GPS
     "AT+CGNSPWR=1",
@@ -53,6 +47,12 @@ const char *connect_command_list[] = {
     // "AT+CPSI?",  // System info
 
     // --- NB-IoT setup
+    // Set preferred mode to AUTOMATIC
+    "AT+CNMP=2", 
+    // Enable CAT-M and NB-IoT scanning
+    "AT+CMNB=3",
+    // Set APN
+    "AT+CGDCONT=1,\"IP\",\"iot\"", 
     // Get IPv4 IP
 		"AT+CNACT=0,1",
     // Wait for IP
@@ -126,7 +126,6 @@ void poll_at()
 		clear_buf();
 		send_at_cmd("AT");
 		k_msleep(200);
-		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
 		if(strstr(rx_buf, search) != NULL)
 			break;
 	}
@@ -139,7 +138,6 @@ void poll_ready()
 	for(;;)
 	{
 		k_msleep(100);
-		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
 		if(strstr(rx_buf, search) != NULL)
 			break;
 	}
@@ -153,8 +151,10 @@ void poll_signal()
 		clear_buf();
 		send_at_cmd("AT+CSQ");
 		k_msleep(500);
-		printk("\n\nbuffer len: %d\n", strlen(rx_buf));
 		char* pos = strstr(rx_buf, search);
+		if (pos == NULL) {
+			continue;
+		}
 		// CSQ: xx,xx
 		// 0123456789
 		*(pos+7) = '\0';
@@ -416,10 +416,6 @@ int main(void)
 	frame_to_send.latitude = 0.0;
 	frame_to_send.longitude = 0.0;
 
-	// Disable radio
-	send_at_cmd("AT+CFUN=0"); 
-	k_msleep(1000);
-
 	// Configure
 	int cmd_count = sizeof(at_command_list) / sizeof(at_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
@@ -428,6 +424,13 @@ int main(void)
 	}
 
 	get_gps_data(&frame_to_send);
+	clear_buf();
+	send_at_cmd("AT+CGNSPWR=0"); 
+	poll_ok();
+
+	// Disable radio
+	send_at_cmd("AT+CFUN=0"); 
+	poll_ok();
 
 	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
