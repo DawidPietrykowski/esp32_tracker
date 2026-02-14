@@ -341,8 +341,6 @@ void get_gps_data(frame *data)
 		  int run_status;
 
 	    while ((token = at_token(&pos)) != NULL) {
-	        printk("Index %d: '%s'\n", index, token);
-        
 	        switch (index) {
 	            case 0: // GNSS Run Status
 	                run_status = atoi(token);
@@ -387,14 +385,13 @@ void get_gps_data(frame *data)
 			  printk("Found GPS position\n");
       	return;
       }
-		} else {
-			if (polling_time >= GPS_POLLING_MAX_MS) {
-			  printk("Failed to get GPS\n");
-			  data->latitude = NAN;
-			  data->longitude = NAN;
-			  data->timestamp = NAN;
-			  return;
-			}
+		}
+		if (polling_time >= GPS_POLLING_MAX_MS) {
+		  printk("Failed to get GPS\n");
+		  data->latitude = NAN;
+		  data->longitude = NAN;
+		  data->timestamp = NAN;
+		  return;
 		}
 		k_msleep(GPS_POLLING_WAIT_MS);
     polling_time += GPS_POLLING_WAIT_MS + GPS_RESPONSE_WAIT_MS;
