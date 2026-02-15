@@ -38,7 +38,7 @@ static int rx_pos = 0;
 #define MODEM_RESPONSE_WAIT_MS  500
 #define GPS_POLLING_WAIT_MS  5000
 #define GPS_RESPONSE_WAIT_MS  500
-#define GPS_POLLING_MAX_NODATE_MS  (1 * 1000)
+#define GPS_POLLING_MAX_NODATE_MS  (60 * 1000)
 #define GPS_POLLING_MAX_DATE_MS  (8 * 60 * 1000)
 
 const char *at_command_list[] = {
@@ -49,8 +49,6 @@ const char *at_command_list[] = {
     // Query SW version
     "AT+CGMR",
     "ATI",
-    // Enable GPS
-    "AT+CGNSPWR=1",
 };
 
 
@@ -71,19 +69,11 @@ const char *connect_command_list[] = {
     // "AT+CGREG?", // LTE Registration
     // "AT+COPS?",  // ISP
     // "AT+CPSI?",  // System info
-
-    // Get IPv4 IP
-		"AT+CNACT=0,1",
 };
 
 const char *http_command_list[] = {
 		// --- HTTP setup
-		// Disconnect
-		"AT+SHDISC",
-
 		// Configure SSL
-		"AT+SHSSL?",
-		"AT+CSSLCFG=?",
 		"AT+CSSLCFG=\"sslversion\",1,3",
 		"AT+CSSLCFG=\"sni\",1,\"gps.dawidpietrykowski.com\"",
 		"AT+CSSLCFG=\"ignorertctime\",1,1",
@@ -291,9 +281,7 @@ int send_frame(frame frame_to_send) {
 	}
 	uart_poll_out(modem_uart, '\r');
 	uart_poll_out(modem_uart, '\n');
-	if (poll_ok(3000) != 0) {
-		return -1;
-	}
+	k_msleep(1000);
 
 	send_at_cmd("AT+SHREQ=\"/pos\",3");
 	if (poll_request(3000) != 0) {
@@ -386,6 +374,8 @@ int64_t gps_date_to_epoch_ms(const char *ts_str)
 
 int get_gps_data(frame *data)
 {
+  // Enable GPS
+	send_at_cmd("AT+CGNSPWR=1");
 	char* search = "+CGNSINF: ";
 	uint32_t polling_time = 0;
 	bool date_received = false;
@@ -449,6 +439,8 @@ int get_gps_data(frame *data)
 	    }
       if (fix_status) {
 			  printk("Found GPS position\n");
+				send_at_cmd("AT+CGNSPWR=0"); 
+				poll_ok(5000);
       	return 0;
       }
 		}
@@ -457,6 +449,8 @@ int get_gps_data(frame *data)
 		  printk("Failed to get GPS: timeout\n");
 		  data->latitude = NAN;
 		  data->longitude = NAN;
+			send_at_cmd("AT+CGNSPWR=0"); 
+			poll_ok(5000);
 		  return -1;
 		}
 		k_msleep(GPS_POLLING_WAIT_MS);
@@ -501,28 +495,37 @@ int configure_bmi160_interrupts()
 
 int power_on_sim7070g()
 {
-    int ret;
+  int ret;
 
-    if (!gpio_is_ready_dt(&modem_pwr)) {
-        printk("Error: Modem GPIO not ready\n");
-        return -1;
-    }
+  if (!gpio_is_ready_dt(&modem_pwr)) {
+      printk("Error: Modem GPIO not ready\n");
+      return -1;
+  }
 
-    ret = gpio_pin_configure_dt(&modem_pwr, GPIO_OUTPUT_INACTIVE);
-    if (ret < 0) {
-        printk("Error: Failed to set modem GPIO\n");
-        return ret;
-    }
+  ret = gpio_pin_configure_dt(&modem_pwr, GPIO_OUTPUT_INACTIVE);
+  if (ret < 0) {
+      printk("Error: Failed to set modem GPIO\n");
+      return ret;
+  }
 
-    gpio_pin_set_dt(&modem_pwr, 1);
-    
-    k_sleep(K_SECONDS(1)); 
-    
-    gpio_pin_set_dt(&modem_pwr, 0);
+  // Set pin HIGH
+  gpio_pin_set_dt(&modem_pwr, 1);
+  
+  k_sleep(K_SECONDS(1)); 
+  
+  // Set pin LOW
+  gpio_pin_set_dt(&modem_pwr, 0);
 
-    k_sleep(K_SECONDS(1));
+  k_sleep(K_SECONDS(1));
 
-    return 0;
+	if (poll_at(10000) != 0) {
+	  printk("Error: AT poll timeout\n");
+		send_at_cmd("AT+CPOWD=1");
+		return -1;
+	}
+  printk("Triggered PWR on SIM7070G\n");
+
+  return 0;
 }
 
 int collect_send_gps_data()
@@ -539,12 +542,6 @@ int collect_send_gps_data()
 
 	// Trigger PWR
 	if (power_on_sim7070g()) return -1;
-	if (poll_at(10000) != 0) {
-	  printk("Error: AT AT poll timeoutpoll timeout\n");
-		send_at_cmd("AT+CPOWD=1");
-		return -1;
-	}
-  printk("Triggered PWR on SIM7070G\n");
 
 	frame frame_to_send;
 	frame_to_send.battery = 0.0; // TODO: ADC for battery level
@@ -558,33 +555,36 @@ int collect_send_gps_data()
 		k_msleep(MODEM_RESPONSE_WAIT_MS);
 	}
 
+	// Try get GPS data
 	if (get_gps_data(&frame_to_send) != 0) {
 	  printk("Failed to get GPS data: sending NAN\n");
 	}
-	send_at_cmd("AT+CGNSPWR=0"); 
-	poll_ok(5000);
 
-	// Reset radio
-	send_at_cmd("AT+CFUN=0"); 
-	poll_ok(5000);
-	// Connect
+	// Reset module completely
+	send_at_cmd("AT+CPOWD=1");
+  poll_ok(5000);
+  k_sleep(K_SECONDS(3));
+	if (power_on_sim7070g()) return -1;
+
+	// Enable LTE radio
+  send_at_cmd("AT+CFUN=1");
+  poll_ok(5000);
+  k_sleep(K_SECONDS(3));
 	cmd_count = sizeof(nbiot_command_list) / sizeof(nbiot_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(nbiot_command_list[i]);
-		k_msleep(500);
+		k_msleep(1000);
 	}
-	send_at_cmd("AT+CFUN=1"); 
-	poll_ready();
 
 	// Check signal
 	int signal = poll_signal();
 	frame_to_send.signal = (double)signal / 99.0;
 
 	// Connect
-	cmd_count = sizeof(connect_command_list) / sizeof(connect_command_list[0]);
-	for (int i = 0; i < cmd_count; i++) {
-		send_at_cmd(connect_command_list[i]);
-		k_msleep(1000);
+	send_at_cmd("AT+CNACT=0,1"); // Activate PDP
+	if (poll_ok(5000) != 0) {
+		send_at_cmd("AT+CPOWD=1");
+		return -1;
 	}
 
 	// Wait for IP
@@ -595,12 +595,17 @@ int collect_send_gps_data()
 	cmd_count = sizeof(http_command_list) / sizeof(http_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(http_command_list[i]);
-		k_msleep(300);
+		k_msleep(1000);
 	}
 
 	// Send request
 	send_at_cmd("AT+SHCONN");
-	poll_ok(5000);
+	if (poll_ok(15000) != 0) {
+	  printk("Error: Connection failed\n");
+		// Disable module
+		send_at_cmd("AT+CPOWD=1");
+		return -1;
+	};
 	if (send_frame(frame_to_send) != 0) {
 	  printk("Error: Request failed\n");
 		// Disable module
@@ -616,7 +621,7 @@ int collect_send_gps_data()
 	return 0;
 }
 
-int configure_wakeup()
+int print_wakeup_reason()
 {
 	esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
 	switch (cause) {
@@ -667,7 +672,7 @@ int main(void)
 	pm_policy_state_lock_get(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
 	pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_RAM, PM_ALL_SUBSTATES);
 
-	configure_wakeup();
+	print_wakeup_reason();
 
 	printk("Sending GPS data\n");
 	collect_send_gps_data();
