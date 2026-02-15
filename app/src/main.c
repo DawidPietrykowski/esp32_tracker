@@ -13,8 +13,15 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/i2c.h>
 #include <string.h>
+#include <esp_sleep.h>
+#include <esp_timer.h>
+#include <driver/gpio.h>
+#include <zephyr/pm/policy.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
+
+static const struct gpio_dt_spec wakeup_pin = GPIO_DT_SPEC_GET(DT_ALIAS(wakeup_pin), gpios);
+#define WAKEUP_TIME_SEC     60
 
 const struct gpio_dt_spec modem_pwr = GPIO_DT_SPEC_GET(DT_ALIAS(modem_pwr), gpios);
 const struct device *modem_uart = DEVICE_DT_GET(DT_ALIAS(modem_uart));
@@ -31,7 +38,8 @@ static int rx_pos = 0;
 #define MODEM_RESPONSE_WAIT_MS  500
 #define GPS_POLLING_WAIT_MS  5000
 #define GPS_RESPONSE_WAIT_MS  500
-#define GPS_POLLING_MAX_MS  15000
+#define GPS_POLLING_MAX_NODATE_MS  (60 * 1000)
+#define GPS_POLLING_MAX_DATE_MS  (8 * 60 * 1000)
 
 const char *at_command_list[] = {
 		// Disable echo
@@ -55,19 +63,16 @@ const char *connect_command_list[] = {
 
     // --- NB-IoT setup
     // Set preferred mode to AUTOMATIC
-    "AT+CNMP=2", 
+    "AT+CNMP=2",
     // Enable CAT-M and NB-IoT scanning
     "AT+CMNB=3",
     // Set APN
     "AT+CGDCONT=1,\"IP\",\"iot\"", 
     // Get IPv4 IP
 		"AT+CNACT=0,1",
-    // Wait for IP
-		"AT+CNACT?",
-		"AT+CNACT?",
-		"AT+CNACT?",
-		"AT+CNACT?",
+};
 
+const char *http_command_list[] = {
 		// --- HTTP setup
 		// Disconnect
 		"AT+SHDISC",
@@ -106,10 +111,17 @@ void uart_cb(const struct device *dev, void *user_data)
 	}
 }
 
+void clear_buf()
+{
+	rx_buf[0] = '\0';
+	rx_pos=0;
+}
+
 void send_at_cmd(const char *cmd)
 {
 	printk("\n\n>>> SENDING: %s", cmd);
 	
+	clear_buf();
 	uart_poll_out(modem_uart, '\r');
 	uart_poll_out(modem_uart, '\n');
 	for (int i = 0; i < strlen(cmd); i++) {
@@ -119,28 +131,25 @@ void send_at_cmd(const char *cmd)
 	uart_poll_out(modem_uart, '\n');
 }
 
-void clear_buf()
-{
-	rx_buf[0] = '\0';
-	rx_pos=0;
-}
-
-void poll_at()
+int poll_at(uint32_t max_ms)
 {
 	char* search = "OK";
+	uint32_t wait_time = 0;
 	for(;;)
 	{
-		clear_buf();
 		send_at_cmd("AT");
 		k_msleep(200);
 		if(strstr(rx_buf, search) != NULL)
-			break;
+			return 0;
+		wait_time += 200;
+		if(wait_time > max_ms) {
+			return -1;
+		}
 	}
 }
 
 void poll_ready()
 {
-	clear_buf();
 	char* search = "SMS Ready";
 	for(;;)
 	{
@@ -155,7 +164,6 @@ int poll_signal()
 	char* search = "CSQ:";
 	for(;;)
 	{
-		clear_buf();
 		send_at_cmd("AT+CSQ");
 		k_msleep(500);
 		char* pos = strstr(rx_buf, search);
@@ -175,9 +183,28 @@ int poll_signal()
 	}
 }
 
+int poll_ip()
+{
+	char* search = "AT+CNACT: ";
+	for(;;)
+	{
+		send_at_cmd("AT+CNACT?");
+		k_msleep(500);
+		char* pos = strstr(rx_buf, search);
+		if (pos == NULL) {
+			continue;
+		}
+		printk("\n\nreceived IP %s\n", pos + strlen(search));
+		if(strstr(pos + strlen(search), "0.0.0.0") == NULL)
+		{
+			printk("\n\nreceived valid IP\n");
+			return 0;
+		}
+	}
+}
+
 void poll_request()
 {
-	clear_buf();
 	char* search = "SHREQ:";
 	for(;;)
 	{
@@ -194,7 +221,6 @@ void poll_request()
 void poll_ok()
 {
 	char* search = "OK";
-	clear_buf();
 	for(;;)
 	{
 		k_msleep(100);
@@ -207,11 +233,10 @@ void poll_ok()
 void poll_shbod()
 {
 	char* search = ">";
-	clear_buf();
 	for(;;)
 	{
 		k_msleep(100);
-		printk("\n\nwaiting for ok, buffer len: %d\n", strlen(rx_buf));
+		printk("\n\nwaiting for shbod ok, buffer len: %d\n", strlen(rx_buf));
 		if(strstr(rx_buf, search) != NULL)
 			break;
 	}
@@ -227,6 +252,7 @@ typedef struct {
 
 int send_frame(frame frame_to_send) {
 	char shbod[100];
+	clear_buf();
 	sprintf(shbod, "AT+SHBOD=%d,%d\r", (int)sizeof(frame), 1000);
 	uart_poll_out(modem_uart, '\r');
 	uart_poll_out(modem_uart, '\n');
@@ -234,13 +260,14 @@ int send_frame(frame frame_to_send) {
 		uart_poll_out(modem_uart, shbod[i]);
 	}
 	poll_shbod();
+	clear_buf();
 	for (int i = 0; i < sizeof(frame_to_send); i++) {
 		uart_poll_out(modem_uart, ((char*)&frame_to_send)[i]);
 	}
 	uart_poll_out(modem_uart, '\r');
 	uart_poll_out(modem_uart, '\n');
-
 	poll_ok();
+
 	send_at_cmd("AT+SHREQ=\"/pos\",3");
 	poll_request();
 
@@ -328,13 +355,14 @@ int64_t gps_date_to_epoch_ms(const char *ts_str)
     return total_ms;
 }
 
-void get_gps_data(frame *data)
+int get_gps_data(frame *data)
 {
 	char* search = "+CGNSINF: ";
 	uint32_t polling_time = 0;
+	bool date_received = false;
+  data->timestamp = NAN;
 
 	for(;;) {
-		clear_buf();
 		send_at_cmd("AT+CGNSINF");
 		k_msleep(GPS_RESPONSE_WAIT_MS);
 		char* pos = strstr(rx_buf, search);
@@ -364,6 +392,7 @@ void get_gps_data(frame *data)
 	                    strncpy(utc_datetime, token, sizeof(utc_datetime) - 1);
 											data->timestamp = (uint64_t)gps_date_to_epoch_ms(utc_datetime);
 			                printk("date: %s, ms: %lld\n", utc_datetime, data->timestamp);
+											date_received = true;
 	                }
 	                break;
 	            case 3: // Latitude
@@ -391,40 +420,54 @@ void get_gps_data(frame *data)
 	    }
       if (fix_status) {
 			  printk("Found GPS position\n");
-      	return;
+      	return 0;
       }
 		}
-		if (polling_time >= GPS_POLLING_MAX_MS) {
-		  printk("Failed to get GPS\n");
+		if ((!date_received && (polling_time >= GPS_POLLING_MAX_NODATE_MS))
+		    || (date_received && (polling_time >= GPS_POLLING_MAX_DATE_MS))) {
+		  printk("Failed to get GPS: timeout\n");
 		  data->latitude = NAN;
 		  data->longitude = NAN;
-		  data->timestamp = NAN;
-		  return;
+		  return -1;
 		}
 		k_msleep(GPS_POLLING_WAIT_MS);
     polling_time += GPS_POLLING_WAIT_MS + GPS_RESPONSE_WAIT_MS;
 	}
 }
 
-void configure_bmi160_interrupts(void)
+int configure_bmi160_interrupts()
 {
-    if (!i2c_is_ready_dt(&dev_i2c)) {
-        printk("I2C bus not ready\n");
-        return;
-    }
+  printk("Initializing BMI160\n");
+  const struct device *const bmi160 = DEVICE_DT_GET_ANY(bosch_bmi160);
 
-    // Enable single-tap interrupt
-    if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_MAP_0, 0x20) != 0) {
-        printk("Failed to write INT_MAP_0\n");
-    }
-    // Configure INT1 output
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x53, 0xA) != 0) {
-        printk("Failed to write INT_OUT_CTRL\n");
-    }
-    // Enable interrupt
-    if (i2c_reg_write_byte_dt(&dev_i2c, 0x50, 0x30) != 0) {
-        printk("Failed to write INT_OUT_CTRL\n");
-    }
+  if (!device_is_ready(bmi160)) {
+      printk("BMI160 is not ready\n");
+      return -1;
+  }
+
+  if (!i2c_is_ready_dt(&dev_i2c)) {
+      printk("I2C bus not ready\n");
+      return -1;
+  }
+
+  // Enable single-tap interrupt
+  if (i2c_reg_write_byte_dt(&dev_i2c, BMI160_REG_INT_MAP_0, 0x20) != 0) {
+      printk("Failed to write INT_MAP_0\n");
+      return -1;
+  }
+  // Configure INT1 output
+  if (i2c_reg_write_byte_dt(&dev_i2c, 0x53, 0xA) != 0) {
+      printk("Failed to write INT_OUT_CTRL\n");
+      return -1;
+  }
+  // Enable interrupt
+  if (i2c_reg_write_byte_dt(&dev_i2c, 0x50, 0x30) != 0) {
+      printk("Failed to write INT_OUT_CTRL\n");
+      return -1;
+  }
+
+  printk("Configured BMI160\n");
+  return 0;
 }
 
 int power_on_sim7070g()
@@ -453,30 +496,26 @@ int power_on_sim7070g()
     return 0;
 }
 
-int main(void)
+int collect_send_gps_data()
 {
-  printk("Starting BMI160 on ESP32-H2\n");
+	printk("Initializing SIM7070G UART\n");
+	// Initialize UART
+	if (!device_is_ready(modem_uart)) return -1;
 
-  const struct device *const bmi160 = DEVICE_DT_GET_ANY(bosch_bmi160);
-
-  if (!device_is_ready(bmi160)) {
-      printk("bmi160 is not ready\n");
-      return 0;
-  }
-
-  configure_bmi160_interrupts();
-
-	printk("--- SIM7070G TEST ---\n");
-
-	if (!device_is_ready(modem_uart)) return 0;
+	k_sleep(K_MSEC(100));
 
 	uart_irq_callback_user_data_set(modem_uart, uart_cb, NULL);
 	uart_irq_rx_enable(modem_uart);
+  printk("Initialized SIM7070G UART\n");
 
-	if (power_on_sim7070g()) return 0;
-
-	poll_at();
-	k_msleep(100);
+	// Trigger PWR
+	if (power_on_sim7070g()) return -1;
+	if (poll_at(10000) != 0) {
+	  printk("AT poll timeout\n");
+		send_at_cmd("AT+CPOWD=1");
+		return -1;
+	}
+  printk("Triggered PWR on SIM7070G\n");
 
 	frame frame_to_send;
 	frame_to_send.battery = 0.0; // TODO: ADC for battery level
@@ -490,18 +529,19 @@ int main(void)
 		k_msleep(MODEM_RESPONSE_WAIT_MS);
 	}
 
-	get_gps_data(&frame_to_send);
-	clear_buf();
+	if (get_gps_data(&frame_to_send) != 0) {
+	  printk("Failed to get GPS data: sending NAN\n");
+	}
 	send_at_cmd("AT+CGNSPWR=0"); 
 	poll_ok();
 
-	// Disable radio
+	// Reset radio
 	send_at_cmd("AT+CFUN=0"); 
 	poll_ok();
-
-	// Enable radio
 	send_at_cmd("AT+CFUN=1"); 
 	poll_ready();
+
+	// Check signal
 	int signal = poll_signal();
 	frame_to_send.signal = (double)signal / 99.0;
 
@@ -509,6 +549,16 @@ int main(void)
 	cmd_count = sizeof(connect_command_list) / sizeof(connect_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(connect_command_list[i]);
+		k_msleep(500);
+	}
+
+	// Wait for IP
+	poll_ip();
+
+	// Configure HTTP
+	cmd_count = sizeof(http_command_list) / sizeof(http_command_list[0]);
+	for (int i = 0; i < cmd_count; i++) {
+		send_at_cmd(http_command_list[i]);
 		k_msleep(500);
 	}
 
@@ -521,6 +571,74 @@ int main(void)
 
 	// Disable module
 	send_at_cmd("AT+CPOWD=1");
+
+	return 0;
+}
+
+int configure_wakeup()
+{
+	esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+	switch (cause) {
+		case ESP_SLEEP_WAKEUP_TIMER:
+			printk("Wakeup cause: TIMER\n");
+			break;
+		case ESP_SLEEP_WAKEUP_EXT1:
+			printk("Wakeup cause: BMI160 movement\n");
+			break;
+		case ESP_SLEEP_WAKEUP_UNDEFINED:
+		default:
+			printk("Wakeup cause: COLD BOOT\n");
+			break;
+	}
+
+	return 0;
+}
+
+int enable_timer_bmi160_wakeup()
+{
+	printk("Enabling timer wakeup\n");
+	uint64_t sleep_time_us = WAKEUP_TIME_SEC * 1000000ULL;
+	esp_sleep_enable_timer_wakeup(sleep_time_us);
+	printk("Timer set for %d seconds.\n", WAKEUP_TIME_SEC);
+
+	// Enable wakeup on bmi160 pin
+	printk("Enabling EXT1 wakeup\n");
+	if (!gpio_is_ready_dt(&wakeup_pin)) {
+		printk("Error: button device %s is not ready\n", wakeup_pin.port->name);
+		return -1;
+	}
+	int ret = gpio_pin_configure_dt(&wakeup_pin, GPIO_INPUT);
+	if (ret != 0) {
+		printk("Error %d: failed to configure %s pin %d\n", ret, wakeup_pin.port->name, wakeup_pin.pin);
+		return -1;
+	}
+
+	// Enable EXT1 wakeup from deep sleep
+	gpio_pin_interrupt_configure_dt(&wakeup_pin, GPIO_INT_DISABLE);
+	esp_sleep_enable_ext1_wakeup(BIT(wakeup_pin.pin), ESP_EXT1_WAKEUP_ANY_HIGH);
+	gpio_pin_interrupt_configure_dt(&wakeup_pin, GPIO_INT_ENABLE);
+
+	return 0;
+}
+
+int main(void)
+{
+	pm_policy_state_lock_get(PM_STATE_STANDBY, PM_ALL_SUBSTATES);
+	pm_policy_state_lock_get(PM_STATE_SUSPEND_TO_RAM, PM_ALL_SUBSTATES);
+
+	configure_wakeup();
+
+	printk("Sending GPS data\n");
+	collect_send_gps_data();
+
+	// Configure BMI160 to send interrupts on movement
+  if(configure_bmi160_interrupts() != 0) return 0;
+	// Enable timer wakeup
+  if(enable_timer_bmi160_wakeup() != 0) return 0;
+	// Enter Deep Sleep
+	printk("Entering Deep Sleep\n");
+	k_sleep(K_MSEC(100)); 
+	esp_deep_sleep_start();
 
 	return 0;
 }

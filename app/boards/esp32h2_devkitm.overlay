@@ -19,7 +19,7 @@
 	buttons {
 		compatible = "gpio-keys";
 		pin0: pin0 {
-			gpios = <&gpio0 3 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+			gpios = <&gpio0 13 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
 			label = "bmi160 INT1";
 		};
 	};
@@ -60,7 +60,7 @@ i2s_led: &i2s {
 &pinctrl {
 	uart1_modem_default: uart1_modem_default {
 		group1 {
-			pinmux = <UART1_TX_GPIO13>,
+			pinmux = <UART1_TX_GPIO3>,
 				     <UART1_RX_GPIO14>;
 			output-high;
 			input-enable;
