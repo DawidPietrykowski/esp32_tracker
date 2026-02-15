@@ -38,7 +38,7 @@ static int rx_pos = 0;
 #define MODEM_RESPONSE_WAIT_MS  500
 #define GPS_POLLING_WAIT_MS  5000
 #define GPS_RESPONSE_WAIT_MS  500
-#define GPS_POLLING_MAX_NODATE_MS  (60 * 1000)
+#define GPS_POLLING_MAX_NODATE_MS  (1 * 1000)
 #define GPS_POLLING_MAX_DATE_MS  (8 * 60 * 1000)
 
 const char *at_command_list[] = {
@@ -53,6 +53,17 @@ const char *at_command_list[] = {
     "AT+CGNSPWR=1",
 };
 
+
+const char *nbiot_command_list[] = {
+    // --- NB-IoT setup
+    // Set preferred mode to AUTOMATIC
+    "AT+CNMP=2",
+    // Enable CAT-M and NB-IoT scanning
+    "AT+CMNB=3",
+    // Set APN
+    "AT+CGDCONT=1,\"IP\",\"iot\"", 
+};
+
 const char *connect_command_list[] = {
     // Check connection
     // "AT+CPSI?",
@@ -61,13 +72,6 @@ const char *connect_command_list[] = {
     // "AT+COPS?",  // ISP
     // "AT+CPSI?",  // System info
 
-    // --- NB-IoT setup
-    // Set preferred mode to AUTOMATIC
-    "AT+CNMP=2",
-    // Enable CAT-M and NB-IoT scanning
-    "AT+CMNB=3",
-    // Set APN
-    "AT+CGDCONT=1,\"IP\",\"iot\"", 
     // Get IPv4 IP
 		"AT+CNACT=0,1",
 };
@@ -101,7 +105,7 @@ void uart_cb(const struct device *dev, void *user_data)
 
 	if (uart_irq_rx_ready(dev)) {
 		while (uart_fifo_read(dev, &c, 1) == 1) {
-			printk("%c", c);
+			// printk("RECEIVED: %d\n", c);
 
 			if (rx_pos < sizeof(rx_buf) - 1) {
 				rx_buf[rx_pos++] = c;
@@ -113,13 +117,15 @@ void uart_cb(const struct device *dev, void *user_data)
 
 void clear_buf()
 {
+	unsigned int key = irq_lock();
 	rx_buf[0] = '\0';
 	rx_pos=0;
+  irq_unlock(key);
 }
 
 void send_at_cmd(const char *cmd)
 {
-	printk("\n\n>>> SENDING: %s", cmd);
+	printk("\n\n>>> SENDING: %s\n", cmd);
 	
 	clear_buf();
 	uart_poll_out(modem_uart, '\r');
@@ -185,16 +191,18 @@ int poll_signal()
 
 int poll_ip()
 {
-	char* search = "AT+CNACT: ";
+	char* search = "CNACT: 0,1,";
 	for(;;)
 	{
 		send_at_cmd("AT+CNACT?");
 		k_msleep(500);
 		char* pos = strstr(rx_buf, search);
-		if (pos == NULL) {
+		char* next_ip_pos = strstr(rx_buf, "CNACT: 1,0");
+		*(next_ip_pos - 1) = '\0';
+		if (pos == NULL || next_ip_pos == NULL) {
 			continue;
 		}
-		printk("\n\nreceived IP %s\n", pos + strlen(search));
+		printk("\nreceived IP %s\n", pos + strlen(search));
 		if(strstr(pos + strlen(search), "0.0.0.0") == NULL)
 		{
 			printk("\n\nreceived valid IP\n");
@@ -203,9 +211,10 @@ int poll_ip()
 	}
 }
 
-void poll_request()
+int poll_request(uint32_t max_ms)
 {
 	char* search = "SHREQ:";
+	uint32_t wait_time = 0;
 	for(;;)
 	{
 		k_msleep(100);
@@ -213,20 +222,28 @@ void poll_request()
 		if(strstr(rx_buf, search) != NULL)
 		{
 			printk("\n\nfinished request\n");
-			break;
+			return 0;
+		}
+		wait_time += 100;
+		if(wait_time > max_ms) {
+			return -1;
 		}
 	}
 }
 
-void poll_ok()
+int poll_ok(uint32_t max_ms)
 {
 	char* search = "OK";
+	uint32_t wait_time = 0;
 	for(;;)
 	{
 		k_msleep(100);
-		printk("\n\nwaiting for ok, buffer len: %d\n", strlen(rx_buf));
 		if(strstr(rx_buf, search) != NULL)
-			break;
+			return 0;
+		wait_time += 100;
+		if(wait_time > max_ms) {
+			return -1;
+		}
 	}
 }
 
@@ -235,10 +252,13 @@ void poll_shbod()
 	char* search = ">";
 	for(;;)
 	{
-		k_msleep(100);
-		printk("\n\nwaiting for shbod ok, buffer len: %d\n", strlen(rx_buf));
+		printk("\n\nwaiting for shbod ok, buffer: \n");
+		for (int i = 0; i <= rx_pos; i++) {
+			printk("buf[%d] = %d\n", i, rx_buf[i]);
+		}
 		if(strstr(rx_buf, search) != NULL)
 			break;
+		k_msleep(500);
 	}
 }
 
@@ -253,25 +273,34 @@ typedef struct {
 int send_frame(frame frame_to_send) {
 	char shbod[100];
 	clear_buf();
+	k_msleep(100);
 	sprintf(shbod, "AT+SHBOD=%d,%d\r", (int)sizeof(frame), 1000);
+	printk(">>> SENDING: %s\n", shbod);
+
 	uart_poll_out(modem_uart, '\r');
 	uart_poll_out(modem_uart, '\n');
 	for (int i = 0; i < strlen(shbod); i++) {
 		uart_poll_out(modem_uart, shbod[i]);
 	}
-	poll_shbod();
+	// TODO: fix rx_buf not receiving '>' character
+	// poll_shbod();
+	k_msleep(100);
 	clear_buf();
 	for (int i = 0; i < sizeof(frame_to_send); i++) {
 		uart_poll_out(modem_uart, ((char*)&frame_to_send)[i]);
 	}
 	uart_poll_out(modem_uart, '\r');
 	uart_poll_out(modem_uart, '\n');
-	poll_ok();
+	if (poll_ok(3000) != 0) {
+		return -1;
+	}
 
 	send_at_cmd("AT+SHREQ=\"/pos\",3");
-	poll_request();
+	if (poll_request(3000) != 0) {
+		return -1;
+	}
 
-	return 1;
+	return 0;
 }
 
 static char *at_token(char **str) {
@@ -360,7 +389,7 @@ int get_gps_data(frame *data)
 	char* search = "+CGNSINF: ";
 	uint32_t polling_time = 0;
 	bool date_received = false;
-  data->timestamp = NAN;
+  data->timestamp = 0;
 
 	for(;;) {
 		send_at_cmd("AT+CGNSINF");
@@ -511,7 +540,7 @@ int collect_send_gps_data()
 	// Trigger PWR
 	if (power_on_sim7070g()) return -1;
 	if (poll_at(10000) != 0) {
-	  printk("AT poll timeout\n");
+	  printk("Error: AT AT poll timeoutpoll timeout\n");
 		send_at_cmd("AT+CPOWD=1");
 		return -1;
 	}
@@ -533,11 +562,17 @@ int collect_send_gps_data()
 	  printk("Failed to get GPS data: sending NAN\n");
 	}
 	send_at_cmd("AT+CGNSPWR=0"); 
-	poll_ok();
+	poll_ok(5000);
 
 	// Reset radio
 	send_at_cmd("AT+CFUN=0"); 
-	poll_ok();
+	poll_ok(5000);
+	// Connect
+	cmd_count = sizeof(nbiot_command_list) / sizeof(nbiot_command_list[0]);
+	for (int i = 0; i < cmd_count; i++) {
+		send_at_cmd(nbiot_command_list[i]);
+		k_msleep(500);
+	}
 	send_at_cmd("AT+CFUN=1"); 
 	poll_ready();
 
@@ -549,25 +584,31 @@ int collect_send_gps_data()
 	cmd_count = sizeof(connect_command_list) / sizeof(connect_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(connect_command_list[i]);
-		k_msleep(500);
+		k_msleep(1000);
 	}
 
 	// Wait for IP
 	poll_ip();
+	k_msleep(1000);
 
 	// Configure HTTP
 	cmd_count = sizeof(http_command_list) / sizeof(http_command_list[0]);
 	for (int i = 0; i < cmd_count; i++) {
 		send_at_cmd(http_command_list[i]);
-		k_msleep(500);
+		k_msleep(300);
 	}
 
 	// Send request
 	send_at_cmd("AT+SHCONN");
-	poll_ok();
-	send_frame(frame_to_send);
+	poll_ok(5000);
+	if (send_frame(frame_to_send) != 0) {
+	  printk("Error: Request failed\n");
+		// Disable module
+		send_at_cmd("AT+CPOWD=1");
+		return -1;
+	}
 	send_at_cmd("AT+SHDISC");
-	poll_ok();
+	poll_ok(3000);
 
 	// Disable module
 	send_at_cmd("AT+CPOWD=1");
